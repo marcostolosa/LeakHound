@@ -1,135 +1,285 @@
-
 # LeakHound
 
-LeakHound is an enterprise-grade, automated security scanner engineered to detect and validate exposed secrets across web infrastructures and local codebases. It operates as a command-line interface (CLI) tool, designed for security professionals, penetration testers, and development teams to proactively identify sensitive information leaks before they can be exploited.
+Automated security scanner for detecting exposed secrets in web infrastructure.
 
-## Core Functionality
+## Overview
 
-LeakHound performs deep scans of specified targets, which can be web URLs or local files. It analyzes the content using a comprehensive library of regular expressions tailored to match the unique formats of secrets, API keys, and sensitive credentials from a wide range of services. When configured to do so, it can also attempt to validate the authenticity of certain secrets by making non-intrusive API calls, providing immediate feedback on the risk level of a finding.
+LeakHound is a multi-threaded Python tool designed to scan web applications, JavaScript files, and configuration endpoints for exposed credentials, API keys, tokens, and other sensitive information. The scanner automatically discovers and analyzes JavaScript resources and common configuration file paths while respecting rate limits to avoid detection.
 
-### Key Features
+## Features
 
-*   **Multi-Target Scanning:** Capable of scanning both remote web endpoints and local files in a single operation.
-*   **Extensive Signature Database:** Includes over 20 proprietary regex patterns to detect secrets from services like AWS, Google, GitHub, Stripe, OpenAI, and more.
-*   **Automated Validation:** Optional feature to validate found secrets (e.g., API keys) against their respective services to confirm their active status and risk level.
-*   **Intelligent Crawling:** A built-in crawler can discover and analyze linked JavaScript files and common configuration file paths (e.g., `.env`, `config.json`) from a starting URL.
-*   **False Positive Reduction:** Employs a heuristic engine to filter out common non-sensitive matches, such as example keys or documentation strings, reducing noise.
-*   **Concurrent Operations:** Utilizes a multi-threaded architecture for high-performance scanning of multiple targets simultaneously.
-*   **Structured Output:** Reports findings in real-time to the console and can save all results in a structured JSON format for further analysis or integration into other security workflows.
-*   **Detailed Categorization:** Findings are automatically categorized (e.g., 'cloud', 'payment', 'ci_cd') and summarized at the end of the scan for quick assessment.
+**Comprehensive Secret Detection**
+- AWS Access Keys and Secret Keys
+- Google, GitHub, GitLab API tokens
+- Stripe, OpenAI, Heroku credentials
+- JWT tokens and private keys
+- Firebase URLs and database credentials
+- Generic API keys, secrets, and tokens
+
+**Intelligent Scanning**
+- Automatic discovery of JavaScript files from HTML pages
+- Common configuration path enumeration (.env, config.json, credentials files)
+- Multi-threaded concurrent scanning with configurable workers
+- Thread-safe operations with proper locking mechanisms
+- Built-in rate limiting to avoid IP bans
+
+**False Positive Filtering**
+- Pattern-based exclusion of example/test credentials
+- Length and format validation
+- Context-aware filtering
+
+**Output Options**
+- Colored terminal output with timestamps
+- JSON file export for integration with other tools
+- Detailed statistics on URLs discovered vs scanned
+- Verbose mode for debugging
 
 ## Installation
 
-### Prerequisites
+**Requirements:**
+- Python 3.7+
+- requests
+- beautifulsoup4
 
-*   Python 3.7 or higher.
-*   `pip` package manager.
+**Install dependencies:**
+```bash
+pip3 install requests beautifulsoup4
+```
 
-### Dependencies
-
-LeakHound requires the following Python libraries:
-
-*   `requests`
-*   `beautifulsoup4`
-
-### Setup
-
-1.  Clone the repository or download the `leakhound.py` script to your local machine.
-2.  Install the necessary dependencies using pip:
-
-    ```bash
-    pip install requests beautifulsoup4
-    ```
-
-3.  Make the script executable (optional, for Unix-like systems):
-
-    ```bash
-    chmod +x leakhound.py
-    ```
+Or using the project virtual environment:
+```bash
+.venv/bin/pip install requests beautifulsoup4
+```
 
 ## Usage
 
-The tool is operated via the command line. The primary mode of action is specified by using either the `-u` (URL) or `-f` (file) flags.
-
-### Command-Line Options
-
-| Option | Description |
-|---|---|
-| `-u`, `--urls` | A space-separated list of one or more URLs to scan. |
-| `-f`, `--files` | A space-separated list of one or more local file paths to scan. |
-| `-t`, `--timeout` | Sets the request timeout in seconds for web requests. Default: `10`. |
-| `-th`, `--threads` | Specifies the number of concurrent threads to use. Default: `10`. |
-| `-v`, `--verbose` | Enables verbose output, providing detailed logs of the scanning process. |
-| `-o`, `--output` | Path to an output file where all findings will be saved in JSON format. |
-| `--no-js` | Disables the automatic discovery and scanning of linked JavaScript files. |
-| `--no-config` | Disables the checking for common configuration files (e.g., `.env`, `config.json`). |
-| `--crawl` | Enables web crawling. When used with `-u`, LeakHound will follow links to JS and config files on the same domain. |
-| `--validate` | Attempts to validate found secrets against their respective APIs. This is an active check and will generate network traffic. |
-| `--version` | Displays the current version of LeakHound and exits. |
-
-### Examples
-
-#### Basic URL Scan
-
-Scan a single URL for secrets without validation or crawling.
-
+**Basic scan:**
 ```bash
 python3 leakhound.py -u https://example.com
 ```
 
-#### Advanced URL Scan with Crawling and Validation
-
-Scan a URL, enable crawling to find linked assets, and attempt to validate any discovered secrets. Save the output to a file.
-
+**Scan with JSON output:**
 ```bash
-python3 leakhound.py -u https://app.target.com --crawl --validate -o findings.json
+python3 leakhound.py -u https://example.com -o findings.json
 ```
 
-#### Scanning Local Files
-
-Scan a directory of source code files for hardcoded secrets.
-
+**Scan multiple URLs:**
 ```bash
-python3 leakhound.py -f ./src/main.py ./config/settings.json
+python3 leakhound.py -u https://example.com https://api.example.com -o results.json
 ```
 
-#### High-Performance Multi-Target Scan
-
-Scan multiple URLs and multiple local files concurrently, using a higher thread count for faster execution.
-
+**Verbose output:**
 ```bash
-python3 leakhound.py -u https://api.service1.com https://docs.service2.com -f ./src/ --threads 20 -v
+python3 leakhound.py -u https://example.com -v
 ```
 
-## Output
+**Custom threading and rate limit:**
+```bash
+python3 leakhound.py -u https://example.com -t 20 -r 0.2
+```
 
-### Console Output
+## Command Line Options
 
-LeakHound provides real-time feedback directly to the console. Each potential secret found is logged with a timestamp, the secret type, the source location, and, if validation is enabled, its status (VALID/INVALID).
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-u`, `--urls` | Target URLs to scan (required) | - |
+| `-o`, `--output` | Output JSON file path | None |
+| `-v`, `--verbose` | Enable verbose output | False |
+| `-t`, `--threads` | Number of concurrent threads | 10 |
+| `-r`, `--rate-limit` | Delay between requests in seconds | 0.1 |
+| `--timeout` | Request timeout in seconds | 10 |
 
-At the conclusion of the scan, a summary is printed, categorizing all findings and providing a total count.
+## How It Works
 
-### JSON Output
+1. **Initial Scan**: Fetches the provided URL and scans content for secrets
+2. **Resource Discovery**: Parses HTML to find JavaScript file references
+3. **Path Enumeration**: Tests common configuration file paths (.env, config.json, etc.)
+4. **Concurrent Processing**: Uses thread pool to scan discovered resources
+5. **Continuous Discovery**: New URLs found during scanning are added to the queue
+6. **Safe Termination**: All tasks complete before scanner exits
 
-When the `-o` flag is used, every finding is recorded as a JSON object in the specified output file. Each object contains the following fields:
+## Secret Detection Patterns
 
-*   `timestamp`: The ISO 8601 formatted time when the secret was found.
-*   `source`: The URL or file path where the secret was located.
-*   `type`: The name of the secret pattern that matched (e.g., 'GitHub Token').
-*   `value`: The actual secret value that was detected.
-*   `context_snippet`: A snippet of the surrounding content (up to 400 characters) for context.
-*   `valid`: (Boolean, if `--validate` is used) `true` if the secret was successfully validated, otherwise `false`.
-*   `risk_level`: (String, if `--validate` is used) An assessment of the risk (e.g., 'CRITICAL', 'MEDIUM').
-*   `details`: (Object, if `--validate` is used) A detailed response or error message from the validation attempt.
-*   `curl_command`: (String, if `--validate` is used) The cURL command equivalent to the validation check, for manual reproduction.
+The scanner uses regex patterns to identify:
 
-## Security and False Positives
+**Cloud Services:**
+- AWS (AKIA keys, secret access keys)
+- Google Cloud (AIza API keys)
+- DigitalOcean (dop_v1 tokens)
+- Heroku (UUID format keys)
 
-While LeakHound is designed for accuracy, no automated tool is perfect. It is strongly recommended to:
+**Version Control:**
+- GitHub (ghp/gho/ghu/ghr/ghs/ghe tokens)
+- GitLab (glpat tokens)
 
-1.  **Manually Verify Findings:** Always review the context of any reported secret to confirm its legitimacy and exposure.
-2.  **Understand Validation:** The `--validate` flag makes active API calls. Use it judiciously to avoid triggering rate limits or security alerts on target services. The provided `curl_command` allows for safe, manual verification.
+**Payment:**
+- Stripe (sk_live/sk_test keys, pk_live/pk_test)
 
-## Contributing
+**AI/ML:**
+- OpenAI (sk- format keys)
 
-This tool is provided as-is for security research and testing purposes. Contributions to expand the pattern database, improve false positive detection, or enhance functionality are welcome. Please ensure any pull requests adhere to the existing code style and include appropriate testing.
+**General:**
+- JWT tokens (eyJ format)
+- RSA/EC/DSA private keys
+- Generic API key/secret/token assignments
+- Firebase database URLs
+- Email addresses and IP addresses
+
+## Configuration File Paths
+
+Automatically tests for:
+- .env, .env.local, .env.production, .env.development, .env.staging
+- config.json, credentials.json, secrets.json
+- database.yml, application.properties, config.yml
+- wp-config.php, web.config
+- .git/config
+- debug.log, error.log, access.log
+- settings.py
+
+## Output Format
+
+**Terminal Output:**
+```
+[20:23:59] Starting scan with 10 threads...
+[20:23:59] Initial URLs to scan: 1
+[20:24:01] Scanning [1/35]: https://example.com/
+[20:24:02] Scanning [2/35]: https://example.com/app.js
+[20:24:05] Found GitHub Token
+    Value: ghp_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r
+    Source: https://example.com/config.js
+```
+
+**JSON Output:**
+```json
+{"timestamp": "2025-12-14T20:24:05.123456", "source": "https://example.com/config.js", "type": "GitHub Token", "value": "ghp_1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r"}
+```
+
+## Technical Details
+
+**Thread Safety:**
+- Per-thread request sessions to avoid connection pool conflicts
+- Mutex locks on shared resources (visited URLs, file writes)
+- Thread-safe deque for URL queue management
+
+**Performance:**
+- Configurable worker threads (default: 10)
+- Rate limiting to avoid triggering WAF/IDS
+- Efficient duplicate URL detection
+- Continuous task submission as new URLs are discovered
+
+**Error Handling:**
+- Graceful handling of connection timeouts
+- SSL verification disabled for flexibility (use with caution)
+- Failed requests logged without stopping scan
+
+## Known Limitations
+
+- Currently discovers resources from HTML only (no JavaScript parsing)
+- Configuration paths tested recursively (may generate excessive requests)
+- No crawling depth limit for .git paths (can be verbose)
+- No support for authenticated scanning
+- No proxy support
+
+## Integration with Reconnaissance Pipeline
+
+LeakHound can be integrated into larger reconnaissance workflows:
+
+```bash
+# Scan all alive domains from httprobe
+cat alive.txt | while read domain; do
+    python3 leakhound.py -u "$domain" -o "secrets_${domain//[^a-zA-Z0-9]/_}.json"
+done
+```
+
+```bash
+# Scan JavaScript files discovered by hakrawler
+cat js_files.txt | python3 leakhound.py -u $(cat -) -o js_secrets.json -t 20
+```
+
+## Comparison with Similar Tools
+
+**vs. truffleHog:** LeakHound focuses on live web scanning rather than git history
+**vs. gitrob:** LeakHound scans running applications, not repositories
+**vs. SecretScanner:** LeakHound includes automatic resource discovery
+
+## Security Considerations
+
+This tool is designed for authorized security testing only. Usage scenarios include:
+
+- Bug bounty programs (with proper authorization)
+- Penetration testing engagements
+- Internal security audits
+- Red team exercises
+
+**Do not use this tool:**
+- Against systems you do not own or have permission to test
+- To extract credentials for malicious purposes
+- In violation of computer fraud laws in your jurisdiction
+
+Rate limiting is included by default to minimize service impact.
+
+## Troubleshooting
+
+**No secrets found on known-vulnerable site:**
+- Check that JavaScript files are being discovered (use -v flag)
+- Verify the secret patterns match your target's format
+- Confirm false positive filters aren't excluding valid findings
+
+**Scanner exits before completing:**
+- Increase timeout value with --timeout
+- Reduce thread count if hitting rate limits
+- Check network connectivity
+
+**High false positive rate:**
+- Review the FALSE_POSITIVE_STRINGS list
+- Adjust minimum value length in is_false_positive()
+- Filter results by secret type in post-processing
+
+## Development
+
+**Project Structure:**
+```
+leakhound.py          # Main scanner implementation
+LEAKHOUND_README.md   # This file
+```
+
+**Key Classes:**
+- `SecretPatterns`: Regex pattern definitions
+- `LeakHound`: Main scanner engine with threading
+- `Colors`: ANSI terminal color codes
+
+**Core Functions:**
+- `find_secrets()`: Pattern matching against content
+- `_process_url()`: Per-URL scanning logic
+- `scan_urls()`: Thread pool management
+
+## Changelog
+
+**v1.1 (Current)**
+- Fixed critical race condition in thread pool
+- Added thread-safe session management
+- Implemented file write locking
+- Added rate limiting support
+- Improved verbose output
+- Added scan statistics (URLs found/scanned)
+- Removed non-functional crawl parameter
+- Enhanced false positive detection
+
+**v1.0 (Original)**
+- Initial release with basic scanning
+- Multi-threading support
+- JSON output format
+- Pattern-based secret detection
+
+## License
+
+MIT License
+
+## Credits
+
+Based on reconnaissance methodologies from the bug bounty community. Enhanced for production security testing with proper thread safety and rate limiting.
+
+## Support
+
+For issues, feature requests, or contributions, refer to the CVE-Hunters Recon project documentation.
+
