@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-LeakHound - An enterprise-grade, automated security scanner engineered
-to detect and validate exposed secrets across web infrastructures.
+LeakHound - Automated security scanner for detecting exposed secrets
+across web infrastructures.
 """
 
 import argparse
@@ -12,6 +12,7 @@ import sys
 import time
 import threading
 import collections
+import concurrent.futures
 from datetime import datetime
 from typing import Dict, List, Set, Optional, Tuple
 from urllib.parse import urljoin, urlparse
@@ -25,7 +26,7 @@ try:
 except AttributeError:
     pass
 
-TOOL_VERSION = '1.0'
+TOOL_VERSION = '1.1'
 
 # --- ANSI Color Codes ---
 class Colors:
@@ -57,12 +58,9 @@ class SecretPatterns:
         'JWT Token': r'\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*\b',
         'Datadog API Key': r'(?i)datadog.*([a-f0-9]{32})',
         'Private Key': r'-----BEGIN (?:RSA|EC|DSA|OPENSSH)?\s*PRIVATE KEY-----',
-        'Crypto Algorithm Usage': r'\b(?:Base64\.encode|Base64\.decode|btoa|atob|CryptoJS\.AES|CryptoJS\.DES|JSEncrypt|rsa|KJUR|(?:md5|sha1|sha256|sha512))\b',
         'Firebase URL': r'https://([a-zA-Z0-9-]+)\.firebaseio\.com',
         'IP Address': r'["\']((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})(?:/\d{1,2})?["\']',
         'IP with Port': r'["\']((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}:\d{1,5})(?:/\S*)?["\']',
-        'Domain Name': r'["\']((?:https?://)?[A-Za-z0-9.\-]+\.[A-Za-z]{2,})(?:[/:][^"\']*)?["\']',
-        'API Path': r'["\'](\/[^\s\'"]{1,512})["\']',
         'Email Address': r'["\']([A-Za-z0-9._\-]+@[A-Za-z0-9.\-]{1,63}\.[A-Za-z]{2,})["\']',
         'Generic API Key': r'["\']?api[_-]?key["\']?\s*[:=]\s*["\']?([\w-]{8,256})["\']?',
         'Generic Secret': r'["\']?secret["\']?\s*[:=]\s*["\']?([\w-]{8,256})["\']?',
@@ -82,6 +80,7 @@ FALSE_POSITIVE_STRINGS = [
     '1234567890abcdef','abcdef1234567890','xxxxxxxxxxxxxxxxxxxx','test_key',
     'example_key','dummy_secret','fake_token','sk_test_1234567890abcdef',
     'ghp_1234567890abcdef1234567890abcdef123456','AKIATEST1234567890AB',
+    'example.com','example.org','localhost','127.0.0.1',
 ]
 
 def is_false_positive(value: str, context: str) -> bool:
@@ -101,6 +100,9 @@ def is_false_positive(value: str, context: str) -> bool:
     if 'abcdef' in v_lower or '123456' in v_lower or 'test' in v_lower:
         return True
 
+    if 'example' in v_lower or 'placeholder' in v_lower or 'replace' in v_lower:
+        return True
+
     return False
 
 # --- Config Paths ---
@@ -112,43 +114,29 @@ class ConfigFilePaths:
         'access.log','settings.py','application.properties','config.yml'
     ]
 
-# --- Validator (mantido) ---
-class SecretValidator:
-    def __init__(self, timeout=10, verbose=False):
-        self.timeout = timeout
-        self.verbose = verbose
-        self.session = requests.Session()
-
-    def validate_secret(self, secret_type, value, source_url, full_content):
-        return {
-            "type": secret_type,
-            "value": value,
-            "valid": False,
-        }
-
 # --- LeakHound Engine ---
 class LeakHound:
-    def __init__(self, timeout=10, verbose=False, threads=10, validate=False, output_file=None):
+    def __init__(self, timeout=10, verbose=False, threads=10, output_file=None, rate_limit=0.1):
         self.timeout = timeout
         self.verbose = verbose
         self.threads = threads
-        self.validate = validate
+        self.rate_limit = rate_limit
         self.patterns = SecretPatterns.get_compiled_patterns()
-        self.validator = SecretValidator() if validate else None
         self.output_file = output_file
         self.file_lock = threading.Lock()
+        self.visited_lock = threading.Lock()
         self.seen_values = set()
         self.summary_data = collections.defaultdict(lambda: collections.defaultdict(int))
         self.visited_urls = set()
-        self.url_queue = collections.deque()
-        self.session = requests.Session()
+        self.urls_to_scan = []
+        self.total_urls_found = 0
+        self.total_urls_scanned = 0
 
     def log(self, msg, color=""):
         ts = datetime.now().strftime("%H:%M:%S")
         print(f"{color}[{ts}] {msg}{Colors.ENDC}")
 
     def find_secrets(self, url, content):
-        """Agora mostra o valor **completo** encontrado na tela"""
         for name, pattern in self.patterns.items():
             for match in pattern.finditer(content):
 
@@ -172,27 +160,42 @@ class LeakHound:
                     "value": value
                 }
 
-                self.summary_data["infrastructure"][name] += 1
+                self.summary_data["secrets"][name] += 1
 
-                # 🔥 Exibe o valor na tela
-                self.log(
-                    f"✓ Found potential secret: {name}\n"
-                    f"    Value: {Colors.WARNING}{value}{Colors.ENDC}\n"
-                    f"    Source: {url}",
-                    Colors.OKGREEN
-                )
+                if self.verbose:
+                    self.log(
+                        f"Found {name}\n"
+                        f"    Value: {Colors.WARNING}{value}{Colors.ENDC}\n"
+                        f"    Source: {url}",
+                        Colors.OKGREEN
+                    )
 
                 if self.output_file:
-                    with open(self.output_file, "a") as f:
-                        f.write(json.dumps(finding) + "\n")
+                    with self.file_lock:
+                        with open(self.output_file, "a") as f:
+                            f.write(json.dumps(finding) + "\n")
 
     def _process_url(self, url):
-        if url in self.visited_urls:
-            return
-        self.visited_urls.add(url)
+        with self.visited_lock:
+            if url in self.visited_urls:
+                return
+            self.visited_urls.add(url)
 
         try:
-            r = self.session.get(url, timeout=self.timeout, verify=False)
+            if self.rate_limit > 0:
+                time.sleep(self.rate_limit)
+
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+
+            r = session.get(url, timeout=self.timeout, verify=False)
+            self.total_urls_scanned += 1
+
+            if self.verbose:
+                self.log(f"Scanning [{self.total_urls_scanned}/{self.total_urls_found}]: {url}", Colors.OKCYAN)
+
             content = r.text
             self.find_secrets(url, content)
 
@@ -200,60 +203,95 @@ class LeakHound:
                 soup = BeautifulSoup(content, "html.parser")
                 for script in soup.find_all("script", src=True):
                     js_url = urljoin(url, script["src"])
-                    self.url_queue.append(js_url)
+                    if js_url not in self.visited_urls:
+                        self.urls_to_scan.append(js_url)
+                        self.total_urls_found += 1
 
                 for path in ConfigFilePaths.PATHS:
                     cfg_url = urljoin(url, path)
-                    self.url_queue.append(cfg_url)
+                    if cfg_url not in self.visited_urls:
+                        self.urls_to_scan.append(cfg_url)
+                        self.total_urls_found += 1
 
         except Exception as e:
-            self.log(f"Error fetching {url}: {e}", Colors.FAIL)
+            if self.verbose:
+                self.log(f"Error fetching {url}: {e}", Colors.FAIL)
 
-    def scan_urls(self, urls, crawl=False):
-        for u in urls:
-            self.url_queue.append(u)
+    def scan_urls(self, urls):
+        self.urls_to_scan = list(urls)
+        self.total_urls_found = len(urls)
 
-        with ThreadPoolExecutor(max_workers=self.threads) as exe:
-            while self.url_queue:
-                url = self.url_queue.popleft()
-                exe.submit(self._process_url, url)
+        self.log(f"Starting scan with {self.threads} threads...", Colors.OKBLUE)
+        self.log(f"Initial URLs to scan: {self.total_urls_found}", Colors.OKBLUE)
+
+        with ThreadPoolExecutor(max_workers=self.threads) as executor:
+            futures = {}
+
+            while self.urls_to_scan or futures:
+                while self.urls_to_scan and len(futures) < self.threads:
+                    url = self.urls_to_scan.pop(0)
+                    future = executor.submit(self._process_url, url)
+                    futures[future] = url
+
+                if futures:
+                    done, _ = concurrent.futures.wait(
+                        futures.keys(),
+                        timeout=0.1,
+                        return_when=concurrent.futures.FIRST_COMPLETED
+                    )
+
+                    for future in done:
+                        futures.pop(future)
+
+        self.log(f"Scan complete. Scanned {self.total_urls_scanned} URLs total.", Colors.OKGREEN)
 
     def print_summary(self):
-        print("\n==================================================")
-        print("Scan Summary")
-        print("==================================================")
+        print("\n" + "="*60)
+        print("SCAN SUMMARY")
+        print("="*60)
 
-        # BUG FIX
         total = sum(
             count
             for category in self.summary_data.values()
             for count in category.values()
         )
 
-        print(f"Total potential secrets found: {total}")
+        print(f"Total URLs discovered: {self.total_urls_found}")
+        print(f"Total URLs scanned: {self.total_urls_scanned}")
+        print(f"Total secrets found: {total}")
 
-        for cat, types in self.summary_data.items():
-            print(f"\n{cat.upper()}")
-            for t, count in types.items():
-                print(f" - {t}: {count}")
-        print("==================================================")
+        if total > 0:
+            for cat, types in self.summary_data.items():
+                print(f"\n{cat.upper()}:")
+                for t, count in sorted(types.items(), key=lambda x: x[1], reverse=True):
+                    print(f"  {t}: {count}")
+
+        print("="*60)
 
 # --- Main ---
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("-u","--urls", nargs="+")
-    p.add_argument("-v","--verbose", action="store_true")
-    p.add_argument("-o","--output")
-    p.add_argument("--crawl", action="store_true")
+    parser = argparse.ArgumentParser(
+        description='LeakHound - Automated secret scanner for web infrastructure',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("-u","--urls", nargs="+", required=True, help="URLs to scan")
+    parser.add_argument("-v","--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("-o","--output", help="Output JSON file")
+    parser.add_argument("-t","--threads", type=int, default=10, help="Number of threads (default: 10)")
+    parser.add_argument("-r","--rate-limit", type=float, default=0.1, help="Rate limit between requests in seconds (default: 0.1)")
+    parser.add_argument("--timeout", type=int, default=10, help="Request timeout in seconds (default: 10)")
 
-    args = p.parse_args()
+    args = parser.parse_args()
 
-    if not args.urls:
-        p.print_help()
-        sys.exit(1)
+    h = LeakHound(
+        timeout=args.timeout,
+        verbose=args.verbose,
+        threads=args.threads,
+        output_file=args.output,
+        rate_limit=args.rate_limit
+    )
 
-    h = LeakHound(verbose=args.verbose, output_file=args.output)
-    h.scan_urls(args.urls, crawl=args.crawl)
+    h.scan_urls(args.urls)
     h.print_summary()
     h.log("Scan finished.", Colors.OKGREEN)
 
